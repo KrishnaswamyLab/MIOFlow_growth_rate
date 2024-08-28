@@ -26,6 +26,7 @@ import torch
 from .utils import sample, generate_steps
 from .losses import MMD_loss, OT_loss, Density_loss, Local_density_loss, density_specified_OT_loss, EnergyLoss, EnergyLossGrowthRate, EnergyLossSeq, EnergyLossGrowthRateSeq
 from .models import GrowthRateModel, GrowthRateSDEModel
+from .utils import kde
 
 DEBUG = False
 def train(
@@ -35,6 +36,7 @@ def train(
 
     sample_size=(100, ),
     sample_with_replacement=False,
+    use_kde=False,
 
     local_loss=True,
     global_loss=False,
@@ -245,9 +247,20 @@ def train(
                 if autoencoder is not None and use_gae:
                     data_t0 = autoencoder.encoder(data_t0)
                     data_t1 = autoencoder.encoder(data_t1)
+
+                if use_kde:
+                    density_t0 = kde(data_t0)
+                    density_t1 = kde(data_t1)
+                    logp0 = torch.log(density_t0).detach()
+                    m0 = (logp0 - logp0.mean()) # normalize the logits to have mean 0, for numerical stability
+                    logp1 = torch.log(density_t1).detach()
+                    m1 = (logp1 - logp1.mean())
+                else:
+                    m0 = None
+                    m1 = None
                 # prediction
                 if growth_rate:
-                    data_tp0, m_tp0 = model(data_t0, time)
+                    data_tp0, m_tp0 = model(data_t0, time, m0=m0)
                     # if m_tp.min() <= 0.:
                     #     print('m:', m_tp.detach().cpu().numpy().tolist())
                     #     for name, param in model.named_parameters():
@@ -269,7 +282,7 @@ def train(
                 # loss between prediction and sample t1
                 if growth_rate:
                     m_tp_threshold, data_tp_threshold = subset_threshold(m_tp, data_tp, threshold_factor=threshold_factor)
-                    loss = lambda_ot * criterion(data_tp_threshold, data_t1, m_tp_threshold)
+                    loss = lambda_ot * criterion(data_tp_threshold, data_t1, m_tp_threshold, m1)
                     # loss = lambda_ot * criterion(data_tp, data_t1, m_tp)
 
                     # if loss.isnan().any():
@@ -399,9 +412,15 @@ def train(
                 ]
             if autoencoder is not None and use_gae:
                 data_ti = [autoencoder.encoder(data) for data in data_ti]
+            if use_kde:
+                density_ti = [kde(data) for data in data_ti]
+                logpi = [torch.log(density).detach() for density in density_ti]
+                mi = [li - li.mean() for li in logpi]
+            else:
+                mi = [None for data in data_ti]
             # prediction
             if growth_rate:
-                data_tp0, m_tp0 = model(data_ti[0], time, return_whole_sequence=True)
+                data_tp0, m_tp0 = model(data_ti[0], time, return_whole_sequence=True, m0=mi[0])
                 if detach_x:
                     data_tp = data_tp0.detach()
                 else:
@@ -439,7 +458,8 @@ def train(
                         ot_loss += criterion(
                             xi_sub,
                             data_ti[i],
-                            mi_sub
+                            mi_sub,
+                            mi[i]
                         )
                 loss = lambda_ot * ot_loss
             else:
@@ -677,6 +697,7 @@ def training_regimen(
     diffusion_lambda_energy_m=1.0,
     diffusion_energy_weighted=True,
     diffusion_energy_detach_m=False,
+    use_kde=False,
 ):
     recon = use_gae and not use_emb
     if steps is None:
@@ -731,6 +752,7 @@ def training_regimen(
             diffusion_lambda_energy_m=diffusion_lambda_energy_m, 
             diffusion_energy_weighted=diffusion_energy_weighted,
             diffusion_energy_detach_m=diffusion_energy_detach_m,
+            use_kde=use_kde,
         )
         for k, v in l_loss.items():  
             local_losses[k].extend(v)
@@ -777,6 +799,7 @@ def training_regimen(
             diffusion_lambda_energy_m=diffusion_lambda_energy_m, 
             diffusion_energy_weighted=diffusion_energy_weighted,
             diffusion_energy_detach_m=diffusion_energy_detach_m,
+            use_kde=use_kde,
         )
         for k, v in l_loss.items():  
             local_losses[k].extend(v)
@@ -824,6 +847,7 @@ def training_regimen(
             diffusion_lambda_energy_m=diffusion_lambda_energy_m, 
             diffusion_energy_weighted=diffusion_energy_weighted,
             diffusion_energy_detach_m=diffusion_energy_detach_m,
+            use_kde=use_kde,
         )
         for k, v in l_loss.items():  
             local_losses[k].extend(v)

@@ -2,7 +2,7 @@
 
 # %% auto 0
 __all__ = ['group_extract', 'sample', 'to_np', 'generate_steps', 'set_seeds', 'config_hold_out', 'config_criterion',
-           'get_groups_from_df', 'get_cell_types_from_df', 'get_sample_n_from_df', 'get_times_from_groups']
+           'get_groups_from_df', 'get_cell_types_from_df', 'get_sample_n_from_df', 'get_times_from_groups', 'kde']
 
 # %% ../nbs/02_utils.ipynb 3
 import numpy as np, pandas as pd
@@ -212,3 +212,44 @@ def get_times_from_groups(groups, where='start', start=0):
         times = times[::-1]
     times = times[start:]
     return times
+
+# %% ../nbs/02_utils.ipynb 5
+import numpy as np
+import torch
+from scipy.stats import gaussian_kde
+
+def kde(data, points_to_evaluate=None, bandwidth=None):
+    """
+    Perform kernel density estimation on n-dimensional data.
+    
+    Args:
+        data (np.ndarray or torch.Tensor): Input data of shape (n_samples, n_dimensions)
+        points_to_evaluate (np.ndarray or torch.Tensor, optional): Points at which to evaluate the KDE. 
+            If None, the original data points are used.
+        bandwidth (float, optional): Bandwidth for KDE. If None, Scott's rule is used.
+    
+    Returns:
+        np.ndarray or torch.Tensor: Estimated density at each point in points_to_evaluate
+    """
+    is_torch = isinstance(data, torch.Tensor)
+    
+    if is_torch:
+        original_dtype = data.dtype
+        original_device = data.device
+        data_np = data.cpu().numpy()
+    else:
+        data_np = data
+    
+    kde = gaussian_kde(data_np.T, bw_method=bandwidth)
+    
+    if points_to_evaluate is None:
+        points_to_evaluate = data_np
+    elif is_torch and isinstance(points_to_evaluate, torch.Tensor):
+        points_to_evaluate = points_to_evaluate.cpu().numpy()
+    
+    result = kde(points_to_evaluate.T)
+    
+    if is_torch:
+        result = torch.tensor(result, dtype=original_dtype, device=original_device)
+    
+    return result

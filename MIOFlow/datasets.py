@@ -3,8 +3,8 @@
 # %% auto 0
 __all__ = ['construct_diamond', 'make_diamonds', 'make_diamonds_partial_holdout', 'make_swiss_roll', 'make_tree',
            'make_worm_data', 'make_eb_data', 'make_dyngen_data', 'relabel_data', 'rings', 'make_rings', 'make_jacks',
-           'branch_data_clean', 'branch_data_data', 'make_branch_cond', 'make_uniform_rect', 'make_gaussian_rect',
-           'make_dying_example_unif', 'make_dying_example_gaus']
+           'branch_data_clean', 'branch_data_data', 'make_branch_cond', 'make_partial_branch', 'make_uniform_rect',
+           'make_gaussian_rect', 'make_dying_example_unif', 'make_dying_example_gaus']
 
 # %% ../nbs/07_datasets.ipynb 3
 import os
@@ -437,12 +437,12 @@ def branch_data_clean(t, e):
     data = np.concatenate((ts, es, data), axis=-1)
     data = data.reshape(shapes[0]*shapes[1], -1)
     return data
-def branch_data_data(data, n_colors=5, repeats=5, noise=0.05, seed=32):
+def branch_data_data(data, n_colors=5, repeats=5, noisex=0.05, noisey=0.05, seed=32):
     data = np.tile(data, (repeats,1))
     df = pd.DataFrame(data, columns=['t', 'e1', 'd1', 'd2'])
     np.random.seed(seed)
-    noise = np.random.normal(0, noise, (data.shape[0], 2))
-    df[['d1', 'd2']] += noise
+    df['d1'] += np.random.randn(df.shape[0]) * noisex
+    df['d2'] += np.random.randn(df.shape[0]) * noisey
     _, bin_edges = np.histogram(df['t'], bins=n_colors)
     bin_indices = np.digitize(df['t'], bin_edges)
     bin_indices[bin_indices > n_colors] = n_colors
@@ -450,14 +450,26 @@ def branch_data_data(data, n_colors=5, repeats=5, noise=0.05, seed=32):
     df.drop(columns=['t'], inplace=True)
     df.samples -=1
     return df
-def make_branch_cond(nt=20, ne=3, n_colors=5, repeats=10, noise=0.1, seed=32):
+def make_branch_cond(nt=20, ne=3, n_colors=5, repeats=10, noisex=0.1, noisey=0.1, seed=32):
     t = np.linspace(0,1,nt)
     e = np.linspace(-1,1,ne)
     data = branch_data_clean(t, e)
-    df = branch_data_data(data, n_colors, repeats, noise, seed)
+    df = branch_data_data(data, n_colors, repeats, noisex, noisey, seed)
     return df
 
-# %% ../nbs/07_datasets.ipynb 20
+# %% ../nbs/07_datasets.ipynb 19
+def make_partial_branch(ne=2, noisex=0.05, noisey=.1, n_colors=5, repeats=20, drop_e=True):
+    df = make_branch_cond(ne=ne, n_colors=n_colors, repeats=repeats, noisex=noisex, noisey=noisey)
+    top_branch = (df['e1'] == 1) & (df['samples'].isin([2,3,4]))
+    df.loc[top_branch, 'd2'] = (df[top_branch]['d2'] - df[top_branch]['d2'].mean())/3 + df[top_branch]['d2'].mean() - 0.2
+    top_drop = np.random.choice(np.where(top_branch)[0], int(top_branch.sum()*2/3))
+    df = df.drop(top_drop, axis=0)
+    if drop_e:
+        df.drop(columns=['e1'], inplace=True)
+    return df
+
+
+# %% ../nbs/07_datasets.ipynb 22
 import numpy as np
 import pandas as pd
 

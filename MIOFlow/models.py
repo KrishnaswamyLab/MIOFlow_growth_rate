@@ -330,8 +330,11 @@ class GrowthRateModel(ToyModel):
         self.m_init = m_init
         self.m_transform = m_transform
     
-    def forward(self, x, t, return_whole_sequence=False):
-        m0 = torch.full((x.size()[0], 1), self.m_init, dtype=x.dtype, device=x.device)
+    def forward(self, x, t, return_whole_sequence=False, m0=None):
+        if m0 is None:
+            m0 = torch.full((x.size()[0], 1), self.m_init, dtype=x.dtype, device=x.device)
+        elif m0.ndim == 1:
+            m0 = m0.unsqueeze(1)
         xm = torch.cat((x,m0),dim=1)
         x = super().forward(xm, t, return_whole_sequence)
         return x[...,:-1], self.m_transform(x[...,-1])
@@ -344,8 +347,11 @@ class GrowthRateSDEModel(ToySDEModel):
         self.m_init = m_init
         self.m_transform = m_transform
     
-    def forward(self, x, t, return_whole_sequence=False, dt=None):
-        m0 = torch.full((x.size()[0], 1), self.m_init, dtype=x.dtype, device=x.device)
+    def forward(self, x, t, return_whole_sequence=False, m0=None, dt=None):
+        if m0 is None:
+            m0 = torch.full((x.size()[0], 1), self.m_init, dtype=x.dtype, device=x.device)
+        elif m0.ndim == 1:
+            m0 = m0.unsqueeze(1)
         xm = torch.cat((x,m0),dim=1)
         x = super().forward(xm, t, return_whole_sequence, dt)
         return x[...,:-1], self.m_transform(x[...,-1])
