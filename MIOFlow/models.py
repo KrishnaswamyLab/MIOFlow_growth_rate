@@ -68,6 +68,7 @@ class ToyODE(nn.Module):
         return dxdt
 
 # %% ../nbs/03_models.ipynb 4
+import torch
 def make_model(
     feature_dims=5,
     layers=[64],
@@ -83,7 +84,7 @@ def make_model(
     use_norm=False,
     use_cuda=False,
     # in_features=2, out_features=2, gunc=None,
-    m_exp=False,
+    m_transform='exp',
     dt=0.1,
 ):
     """
@@ -91,6 +92,14 @@ def make_model(
     See the parameters of the respective classes.
     """
     assert use_norm == False, "This way of energy loss is removed. Now using energy loss."
+    if m_transform == 'exp':
+        m_trans = torch.exp
+        m_init = 0.
+    elif m_transform == 'relu':
+        m_trans = torch.nn.functional.relu
+        m_init = 1.
+    else:
+        raise ValueError('m_transform must be exp or relu')
     if which == 'ode':
         ode = ToyODE(feature_dims, layers, activation,scales,n_aug)
         model = ToyModel(ode,method,rtol, atol)
@@ -104,22 +113,14 @@ def make_model(
     elif which == 'ode_growth_rate':
         # ode = ToyODE(feature_dims + 1, layers, activation,scales,n_aug, zero_gate=True)
         ode = ToyODE(feature_dims + 1, layers, activation,scales,n_aug, zero_gate=False)
-        if m_exp:
-            m_trans = torch.exp
-        else:
-            m_trans = lambda x: x
-        model = GrowthRateModel(ode,method,rtol, atol, m_transform=m_trans)
+        model = GrowthRateModel(ode,method,rtol, atol, m_transform=m_trans, m_init=m_init)
     elif which == 'sde_growth_rate':
         assert method in ['adjoint_reversible_heun', 'euler', 'euler_heun', 'heun', 'log_ode', 'midpoint', 'milstein', 'reversible_heun', 'srk'] # rk4 not supported.
         ode = ToyODE(feature_dims + 1, layers, activation,scales,n_aug, zero_gate=True)
         gunc = ToyODE(feature_dims + 1, layers, activation,scales,n_aug, zero_gate=False)
-        if m_exp:
-            m_trans = torch.exp
-        else:
-            m_trans = lambda x: x
         model = GrowthRateSDEModel(
             ode, method, noise_type, sde_type,
-            in_features=feature_dims + 1, out_features=feature_dims + 1, gunc=gunc, dt=dt, m_transform=m_trans,
+            in_features=feature_dims + 1, out_features=feature_dims + 1, gunc=gunc, dt=dt, m_transform=m_trans, m_init=m_init,
         )
     else:
         raise ValueError(f"Model {which} not recognized.")
@@ -325,7 +326,7 @@ class GrowthRateModel(ToyModel):
     """
     Last feature dim is the growth rate / mass.
     """
-    def __init__(self, func, method='rk4', rtol=None, atol=None, use_norm=False, m_init=0., m_transform=lambda x: x):
+    def __init__(self, func, method='rk4', rtol=None, atol=None, use_norm=False, m_init=1., m_transform=lambda x: x):
         super().__init__(func, method, rtol, atol, use_norm)
         self.m_init = m_init
         self.m_transform = m_transform
