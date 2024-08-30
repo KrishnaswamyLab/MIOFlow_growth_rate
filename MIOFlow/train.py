@@ -220,6 +220,8 @@ def train(
 
     assert use_penalty == False and use_penalty_m == False, 'Use energy penalty instead of norm penalty!'
 
+    assert not use_kde, 'KDE disabled to avoid curse of dimensionality when latent space dimension is not 2 or 3.'
+
     model.train()
     
     for batch in tqdm(range(n_batches)):
