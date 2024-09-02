@@ -4,7 +4,7 @@
 __all__ = ['construct_diamond', 'make_diamonds', 'make_diamonds_partial_holdout', 'make_swiss_roll', 'make_tree',
            'make_worm_data', 'make_eb_data', 'make_dyngen_data', 'relabel_data', 'rings', 'make_rings', 'make_jacks',
            'branch_data_clean', 'branch_data_data', 'make_branch_cond', 'make_partial_branch', 'make_uniform_rect',
-           'make_gaussian_rect', 'make_dying_example_unif', 'make_dying_example_gaus']
+           'make_gaussian_rect', 'make_dying_example_unif', 'make_dying_example_gaus', 'make_growing']
 
 # %% ../nbs/07_datasets.ipynb 3
 import os
@@ -589,3 +589,38 @@ def make_dying_example_gaus(n_pts_per_bin=50, seed=223):
     # Concatenate the dataframes
     df = pd.concat([df_tp0, df_tp1, df_tp2, df_tp3, df_tp4], ignore_index=True)
     return df
+
+# %% ../nbs/07_datasets.ipynb 26
+import numpy as np
+import pandas as pd
+
+def make_growing(n_points_per_part=[50,100,150,200], noise_level=0.1, x_max=1):
+    """
+    Generates random points in the region between y=x^2, y=-x^2, and x=x_max, and adds noise to it.
+    The points are split evenly into parts with numbers equal to len(n_points_per_part) by x.
+    
+    Parameters:
+    n_points_per_part (list of int): List containing the number of points to generate in each part.
+    noise_level (float): Standard deviation of the Gaussian noise to be added.
+    x_max (float): The maximum range of x.
+    
+    Returns:
+    pd.DataFrame: DataFrame containing the generated points with columns 'd1', 'd2', and 'samples'.
+    """
+    n_parts = len(n_points_per_part)
+    x_ranges = [(i * x_max / n_parts, (i + 1) * x_max / n_parts) for i in range(n_parts)]
+    
+    points = []
+    
+    for i, n_points in enumerate(n_points_per_part):
+        x = np.random.uniform(x_ranges[i][0], x_ranges[i][1], n_points)
+        y = np.random.uniform(-x**2, x**2, n_points)
+        noise_x = np.random.normal(0, noise_level, n_points)
+        noise_y = np.random.normal(0, noise_level, n_points)
+        part_points = np.vstack((x + noise_x, y + noise_y)).T
+        samples = np.full(n_points, i)
+        part_df = pd.DataFrame(part_points, columns=['d1', 'd2'])
+        part_df['samples'] = samples
+        points.append(part_df)
+    
+    return pd.concat(points, ignore_index=True)
