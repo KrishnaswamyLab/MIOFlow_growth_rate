@@ -284,8 +284,10 @@ def train(
                     data_tp, data_t1 = autoencoder.encoder(data_tp), autoencoder.encoder(data_t1)
                 # loss between prediction and sample t1
                 if growth_rate and unbalanced:
+                    # m_t0 = group_sizes[t0] * torch.ones(data_t0.size(0), dtype=data_t0.dtype, device=data_t0.device)
                     m_t1 = group_sizes[t1] * torch.ones(data_t1.size(0), dtype=data_t1.dtype, device=data_t1.device)
                     ot_loss, marginal_loss = criterion(data_tp, data_t1, m_tp, m_t1)
+                    # ot_loss, marginal_loss = criterion(data_tp, data_t1, m_t0, m_t1)
                     loss = lambda_ot * ot_loss + lambda_marginal * marginal_loss
                 elif growth_rate and not unbalanced:
                     loss = lambda_ot * criterion(data_tp, data_t1, m_tp, m1)
@@ -347,12 +349,18 @@ def train(
                     # now taking the mean over all points, 
                     # because we allow individual points to be large or small in mass,
                     # but we want the average to stay the same for stablity.
-                    m_loss = (torch.square(m_tp.mean(axis=-1) - model.m_init)).mean() 
+                    if unbalanced:
+                        m_loss = (torch.square(m_tp.mean(axis=-1) - group_sizes[t1])).mean() 
+                    else:
+                        m_loss = (torch.square(m_tp.mean(axis=-1) - model.m_init)).mean() 
                     if DEBUG and m_tp.min() <= 0.:
                         print("Mass loss", m_loss.item())
                     loss += lambda_m * m_loss
                 if growth_rate and lambda_m2 > 0:
-                    m_loss = (torch.square(m_tp - model.m_init)).mean()
+                    if unbalanced:
+                        m_loss = (torch.square(m_tp - group_sizes[t1])).mean()
+                    else:
+                        m_loss = (torch.square(m_tp - model.m_init)).mean()
                     if DEBUG and m_tp.min() <= 0.:
                         print("Mass loss 2", m_loss.item())
                     loss += lambda_m2 * m_loss
@@ -459,6 +467,7 @@ def train(
                 marginal_loss = 0.
                 for i in range(1, len(groups)):
                     if groups[i] != to_ignore:
+                        # TODO update according to the local loss -- use m_t0 instead of m_tp.
                         m_t1 = group_sizes[groups[i]] * torch.ones(data_ti[i].size(0), dtype=data_ti[i].dtype, device=data_ti[i].device)
                         ol, ml = criterion(data_tp[i], data_ti[i], m_tp[i], m_t1)
                         ot_loss += ol
@@ -517,14 +526,25 @@ def train(
             #         if groups[i] != to_ignore])
             #     loss += lambda_energy_m * penalty_m
 
+            if unbalanced:
+                mass_factors = [group_sizes[groups[i]] for i in non_ignore_idx]
+                mass_factors = torch.tensor(mass_factors, device=m_tp.device, dtype=m_tp.dtype)
+
             if growth_rate and lambda_m > 0:
                 # now taking the mean over all points, 
                 # because we allow individual points to be large or small in mass,
                 # but we want the average to stay the same for stablity.
-                m_loss = (torch.square(m_tp[non_ignore_idx,...].mean(axis=-1) - model.m_init)).mean() 
+                # TODO change into group_sizes[t1] with a for loop.
+                if unbalanced:
+                    m_loss = (torch.square(m_tp[non_ignore_idx,...].mean(axis=-1) - mass_factors)).mean() 
+                else:
+                    m_loss = (torch.square(m_tp[non_ignore_idx,...].mean(axis=-1) - model.m_init)).mean() 
                 loss += lambda_m * m_loss
             if growth_rate and lambda_m2 > 0:
-                m_loss = (torch.square(m_tp - model.m_init)).mean()
+                if unbalanced:
+                    m_loss = (torch.square(m_tp[non_ignore_idx,...] - mass_factors.unsqueeze(-1))).mean()
+                else:
+                    m_loss = (torch.square(m_tp[non_ignore_idx,...] - model.m_init)).mean()
                 loss += lambda_m2 * m_loss
 
                                        
