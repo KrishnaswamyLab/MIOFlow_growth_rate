@@ -78,6 +78,7 @@ def train(
     diffusion_lambda_energy_m=1.0,
     diffusion_energy_weighted=True,
     diffusion_energy_detach_m=False,
+    match_total_mass=True,
 ):
 
     '''
@@ -215,8 +216,11 @@ def train(
 
     unbalanced = isinstance(criterion, UOT_loss)
     if unbalanced:
-        group_sizes = df['samples'].value_counts()
-        group_sizes = group_sizes / group_sizes[0] # normalize the mass so it starts from 1.
+        if match_total_mass:
+            group_sizes = df['samples'].value_counts()
+            group_sizes = group_sizes / group_sizes[0] # normalize the mass so it starts from 1.
+        else:
+            group_sizes = np.ones(len(groups))
         # assert model.m_init == 0. # TODO this is when we use exponential. need to change when we use relu!
         assert growth_rate, 'Growth rate must be True when using unbalanced OT loss.'
         assert not density_fn.use_softmax, 'Softmax is not allowed in unbalanced OT loss.'
@@ -729,6 +733,7 @@ def training_regimen(
     diffusion_energy_weighted=True,
     diffusion_energy_detach_m=False,
     use_kde=False,
+    match_total_mass=True,
 ):
     recon = use_gae and not use_emb
     if steps is None:
@@ -783,6 +788,7 @@ def training_regimen(
             diffusion_energy_weighted=diffusion_energy_weighted,
             diffusion_energy_detach_m=diffusion_energy_detach_m,
             use_kde=use_kde,
+            match_total_mass=match_total_mass,
         )
         for k, v in l_loss.items():  
             local_losses[k].extend(v)
@@ -829,6 +835,7 @@ def training_regimen(
             diffusion_energy_weighted=diffusion_energy_weighted,
             diffusion_energy_detach_m=diffusion_energy_detach_m,
             use_kde=use_kde,
+            match_total_mass=match_total_mass,
         )
         for k, v in l_loss.items():  
             local_losses[k].extend(v)
@@ -876,6 +883,7 @@ def training_regimen(
             diffusion_energy_weighted=diffusion_energy_weighted,
             diffusion_energy_detach_m=diffusion_energy_detach_m,
             use_kde=use_kde,
+            match_total_mass=match_total_mass,
         )
         for k, v in l_loss.items():  
             local_losses[k].extend(v)
