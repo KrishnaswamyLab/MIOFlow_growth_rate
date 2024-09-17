@@ -35,9 +35,16 @@ class ToyODE(nn.Module):
         scales=None,
         n_aug=2,
         zero_gate=False,
+        time_homogeneous=False,
+        unif_velo=False,
+        unif_velo_strict=False,
     ):
         super(ToyODE, self).__init__()
-        steps = [feature_dims+1+n_aug, *layers, feature_dims]
+        self.time_homogeneous = time_homogeneous
+        if time_homogeneous:
+            steps = [feature_dims+n_aug, *layers, feature_dims]
+        else:
+            steps = [feature_dims+1+n_aug, *layers, feature_dims]
         pairs = zip(steps, steps[1:])
 
         chain = list(itertools.chain(*list(zip(
@@ -50,21 +57,38 @@ class ToyODE(nn.Module):
         
         self.alpha = nn.Parameter(torch.tensor(scales, requires_grad=True).float()) if scales is not None else None
         self.n_aug = n_aug       
-        self.zero_gate = zero_gate 
+        self.zero_gate = zero_gate
+        
+        self.unif_velo_strict = unif_velo_strict
+        if unif_velo_strict:
+            # assert unif_velo, "Cannot set unif_velo_strict to True without unif_velo."
+            unif_velo = True
+        self.unif_velo = unif_velo
+        if unif_velo:
+            self.mean_velo_logit = nn.Parameter(torch.tensor(0.).float(), requires_grad=True)
         
     def forward(self, t, x): #NOTE the forward pass when we use torchdiffeq must be forward(self,t,x)
         if self.zero_gate:
             m = x[...,-1]
         zero = torch.tensor([0]).cuda() if x.is_cuda else torch.tensor([0])
         zeros = zero.repeat(x.size()[0],self.n_aug)
-        time = t.repeat(x.size()[0],1)
-        aug = torch.cat((x,time,zeros),dim=1)
+        if self.time_homogeneous:
+            aug = torch.cat((x,zeros),dim=1)
+        else:
+            time = t.repeat(x.size()[0],1)
+            aug = torch.cat((x,time,zeros),dim=1)
         x = self.seq(aug)
         if self.alpha is not None:
             z = torch.randn(x.size(),requires_grad=False).cuda() if x.is_cuda else torch.randn(x.size(),requires_grad=False)
         dxdt = x + z*self.alpha[int(t-1)] if self.alpha is not None else x
         if self.zero_gate:
             dxdt[m == 0., -1] = 0.
+
+        if self.unif_velo_strict:
+            norms = dxdt[...,:-1].norm(dim=-1, keepdim=True)
+            dxdt1 = torch.cat((dxdt[...,:-1] / norms * torch.exp(self.mean_velo_logit), dxdt[...,-1].unsqueeze(-1)), dim=-1)
+            return dxdt1
+        
         return dxdt
 
 # %% ../nbs/03_models.ipynb 4
@@ -86,6 +110,9 @@ def make_model(
     # in_features=2, out_features=2, gunc=None,
     m_transform='exp',
     dt=0.1,
+    time_homogeneous=False,
+    unif_velo=False,
+    unif_velo_strict=False,
 ):
     """
     Creates the 'ode' model or 'sde' model or the Geodesic Autoencoder. 
@@ -101,7 +128,7 @@ def make_model(
     else:
         raise ValueError('m_transform must be exp or relu')
     if which == 'ode':
-        ode = ToyODE(feature_dims, layers, activation,scales,n_aug)
+        ode = ToyODE(feature_dims, layers, activation,scales,n_aug, time_homogeneous=time_homogeneous, unif_velo=unif_velo, unif_velo_strict=unif_velo_strict)
         model = ToyModel(ode,method,rtol, atol)
     elif which == 'sde':
         raise NotImplementedError("SDE model not implemented.")
@@ -112,12 +139,12 @@ def make_model(
         # )
     elif which == 'ode_growth_rate':
         # ode = ToyODE(feature_dims + 1, layers, activation,scales,n_aug, zero_gate=True)
-        ode = ToyODE(feature_dims + 1, layers, activation,scales,n_aug, zero_gate=False)
+        ode = ToyODE(feature_dims + 1, layers, activation,scales,n_aug, zero_gate=False, time_homogeneous=time_homogeneous, unif_velo=unif_velo, unif_velo_strict=unif_velo_strict)
         model = GrowthRateModel(ode,method,rtol, atol, m_transform=m_trans, m_init=m_init)
     elif which == 'sde_growth_rate':
         assert method in ['adjoint_reversible_heun', 'euler', 'euler_heun', 'heun', 'log_ode', 'midpoint', 'milstein', 'reversible_heun', 'srk'] # rk4 not supported.
-        ode = ToyODE(feature_dims + 1, layers, activation,scales,n_aug, zero_gate=True)
-        gunc = ToyODE(feature_dims + 1, layers, activation,scales,n_aug, zero_gate=False)
+        ode = ToyODE(feature_dims + 1, layers, activation,scales,n_aug, zero_gate=True, time_homogeneous=time_homogeneous, unif_velo=unif_velo, unif_velo_strict=unif_velo_strict)
+        gunc = ToyODE(feature_dims + 1, layers, activation,scales,n_aug, zero_gate=False, time_homogeneous=time_homogeneous, unif_velo=unif_velo, unif_velo_strict=unif_velo_strict)
         model = GrowthRateSDEModel(
             ode, method, noise_type, sde_type,
             in_features=feature_dims + 1, out_features=feature_dims + 1, gunc=gunc, dt=dt, m_transform=m_trans, m_init=m_init,

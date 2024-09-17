@@ -54,3 +54,10 @@ MANIFEST
 old/
 old2/
 *.old
+cflows/
+cflows_
+cflows_larger_data
+cflows_larger_data_inverse_reverse
+cflows_larger_data_no_subsample
+cflows_larger_data_inverse
+cflows copy Sep 16 9:08

@@ -2,7 +2,8 @@
 
 # %% auto 0
 __all__ = ['hard_softmax', 'MMD_loss', 'OT_loss', 'UOT_loss', 'normalize_by_sum', 'density_specified_OT_loss', 'Density_loss',
-           'Local_density_loss', 'EnergyLossSeq', 'EnergyLossGrowthRateSeq', 'EnergyLoss', 'EnergyLossGrowthRate']
+           'Local_density_loss', 'EnergyLossSeq', 'EnergyLossGrowthRateSeq', 'EnergyLoss', 'EnergyLossGrowthRate',
+           'UnifVeloLossSeq', 'UnifVeloLossGrowthRateSeq', 'UnifVeloLoss', 'UnifVeloLossGrowthRate']
 
 # %% ../nbs/01_losses.ipynb 3
 import os, math, numpy as np
@@ -375,3 +376,122 @@ class EnergyLossGrowthRate(nn.Module):
                 masses = masses.detach()
             dxdt = dxdt * masses.unsqueeze(-1) # weighted by mass
         return torch.square(dxdt[...,:-1]).mean(), torch.square(dxdt[...,-1]).mean()
+
+# %% ../nbs/01_losses.ipynb 12
+# not going to penalize m velo because it is growth rate.
+class UnifVeloLossSeq(nn.Module):
+    def __init__(self, square=False, topk=None):
+        self.square = square
+        self.topk = topk
+
+    def __call__(self, func, xtseq, t, mean_velo):
+        dxdt = torch.stack([func(t[i], xtseq[i]) for i in range(len(t))])
+        norms = dxdt.norm(dim=-1)
+        if self.square:
+            res = torch.square(norms - mean_velo)
+            # return torch.square(norms - mean_velo).mean()
+        else:
+            # return torch.abs(norms - mean_velo).mean()
+            res = torch.abs(norms - mean_velo)
+        if self.topk is not None:
+            values, _ = torch.topk(res, self.topk, dim=0, largest=True, sorted=True)
+            return values.mean()
+        else:
+            return res.mean()
+    
+class UnifVeloLossGrowthRateSeq(nn.Module):
+    def __init__(self, weighted=True, detach_m=False, use_softmax=False, use_hard_softmax=False, square=False, topk=None):
+        self.weighted = weighted
+        self.detach_m = detach_m
+        self.use_softmax = use_softmax
+        if use_softmax:
+            if use_hard_softmax:
+                self.softmax = lambda x: hard_softmax(x, dim=-1)
+            else:
+                self.softmax = lambda x: nn.functional.softmax(x, dim=-1)
+        else:
+            # self.softmax = lambda x: x / x.size(-1)
+            self.softmax = normalize_by_sum
+        self.square = square
+        self.topk = topk
+    def __call__(self, func, xtseq, mtseq, t, mean_velo):
+        """Returns the UnifVelo wrt the x and m curves separately.
+
+        Args:
+            func (_type_): _description_
+            xtseq (_type_): _description_
+            mtseq (_type_): _description_
+            t (_type_): _description_
+
+        Returns:
+            _type_: _description_
+        """
+        xmseq = torch.cat([xtseq, mtseq.unsqueeze(-1)], dim=-1)
+        dxdt = torch.stack([func(t[i], xmseq[i]) for i in range(len(t))])
+        if self.weighted:
+            masses = self.softmax(mtseq) * mtseq.shape[-1]
+            if self.detach_m:
+                masses = masses.detach()
+            dxdt = dxdt * masses.unsqueeze(-1) # weighted by mass
+        # return torch.square(dxdt[...,:-1]).sum(axis=-1).var(), torch.square(dxdt[...,-1]).var()
+        norms = dxdt[...,:-1].norm(dim=-1)
+        if self.square:
+            res = torch.square(norms - mean_velo)
+        else:
+            res = torch.abs(norms - mean_velo)
+        if self.topk is not None:
+            values, _ = torch.topk(res, self.topk, dim=0, largest=True, sorted=True)
+            return values.mean()
+        else:
+            return res.mean()
+    
+class UnifVeloLoss(nn.Module):
+    def __init__(self, square=False, topk=None):
+        self.square = square
+        self.topk = topk
+
+    def __call__(self, func, x, t, mean_velo): # should use the current t. i.e. t_seq[-1]
+        dxdt = func(t, x)
+        if self.square:
+            res = torch.square(dxdt.norm(dim=-1) - mean_velo)
+        else:
+            res = torch.abs(dxdt.norm(dim=-1) - mean_velo)
+        if self.topk is not None:
+            values, _ = torch.topk(res, self.topk, dim=0, largest=True, sorted=True)
+            return values.mean()
+        else:
+            return res.mean()
+
+class UnifVeloLossGrowthRate(nn.Module):
+    def __init__(self, weighted=True, detach_m=False, use_softmax=False, use_hard_softmax=False, square=False, topk=None):
+        self.weighted = weighted
+        self.detach_m = detach_m
+        self.use_softmax = use_softmax
+        if use_softmax:
+            if use_hard_softmax:
+                self.softmax = lambda x: hard_softmax(x, dim=-1)
+            else:
+                self.softmax = lambda x: nn.functional.softmax(x, dim=-1)
+        else:
+            # self.softmax = lambda x: x / x.size(-1)
+            self.softmax = normalize_by_sum
+        self.square = square
+        self.topk = topk
+
+    def __call__(self, func, x, m, t, mean_velo):
+        xm = torch.cat([x, m.unsqueeze(-1)], dim=-1)
+        dxdt = func(t, xm)
+        if self.weighted:
+            masses = self.softmax(m) * m.shape[-1]
+            if self.detach_m:
+                masses = masses.detach()
+            dxdt = dxdt * masses.unsqueeze(-1) # weighted by mass
+        if self.square:
+            res = torch.square(dxdt[...,:-1].norm(dim=-1) - mean_velo)
+        else:
+            res = torch.abs(dxdt[...,:-1].norm(dim=-1) - mean_velo)
+        if self.topk is not None:
+            values, _ = torch.topk(res, self.topk, dim=0, largest=True, sorted=True)
+            return values.mean()
+        else:
+            return res.mean()

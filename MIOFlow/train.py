@@ -17,8 +17,9 @@ from .utils import sample, generate_steps
 from .losses import MMD_loss, OT_loss, Density_loss, Local_density_loss, density_specified_OT_loss, EnergyLoss, EnergyLossGrowthRate, EnergyLossSeq, EnergyLossGrowthRateSeq
 from .models import GrowthRateModel, GrowthRateSDEModel
 from .utils import kde
-
+from .losses import UnifVeloLossSeq, UnifVeloLossGrowthRateSeq, UnifVeloLoss, UnifVeloLossGrowthRate
 DEBUG = False
+
 def train(
     model, df, groups, optimizer, n_batches=20, 
     criterion=MMD_loss(),
@@ -79,6 +80,13 @@ def train(
     diffusion_energy_weighted=True,
     diffusion_energy_detach_m=False,
     match_total_mass=True,
+
+    lambda_unif_velo=0.,
+    unif_velo_weighted=True,
+    unif_velo_detach_m=False,
+    unif_velo_square=False,
+    unif_velo_topk=None,
+
 ):
 
     '''
@@ -155,6 +163,8 @@ def train(
         lambda_energy (float): Default to '1.0'. The weight of the energy penalty.
 
         reverse (bool): Whether to train time backwards.
+
+        log_every (int): Default to '1'. Log losses every x batches.
     '''
 
     """
@@ -209,6 +219,10 @@ def train(
     energy_loss_sde_growth_rate_seq = EnergyLossGrowthRateSeq(weighted=diffusion_energy_weighted, detach_m=diffusion_energy_detach_m)
     energy_loss = EnergyLoss()
     energy_loss_seq = EnergyLossSeq()
+    unif_velo_loss_seq = UnifVeloLossSeq(square=unif_velo_square, topk=unif_velo_topk)
+    unif_velo_loss_growth_rate_seq = UnifVeloLossGrowthRateSeq(weighted=unif_velo_weighted, detach_m=unif_velo_detach_m, square=unif_velo_square, topk=unif_velo_topk)
+    unif_velo_loss = UnifVeloLoss(square=unif_velo_square, topk=unif_velo_topk)
+    unif_velo_loss_growth_rate = UnifVeloLossGrowthRate(weighted=unif_velo_weighted, detach_m=unif_velo_detach_m, square=unif_velo_square, topk=unif_velo_topk)
 
     assert use_penalty == False and use_penalty_m == False, 'Use energy penalty instead of norm penalty!'
 
@@ -228,6 +242,21 @@ def train(
         assert not energy_loss_growth_rate_seq.use_softmax, 'Softmax is not allowed in unbalanced OT loss.'
 
     model.train()
+    
+    # Initialize a dictionary to store all losses
+    all_losses = {
+        'batch_loss': [],
+        'ot_loss': [],
+        'marginal_loss': [],
+        'density_loss': [],
+        'energy_loss': [],
+        'energy_mass_loss': [],
+        'diffusion_energy_loss': [],
+        'diffusion_energy_mass_loss': [],
+        'unif_velo_loss': [],
+        'mass_loss': [],
+        'mass_loss2': [],
+    }
     
     for batch in tqdm(range(n_batches)):
         # print(f'Batch {batch+1}/{n_batches}')
@@ -293,6 +322,8 @@ def train(
                     ot_loss, marginal_loss = criterion(data_tp, data_t1, m_tp, m_t1)
                     # ot_loss, marginal_loss = criterion(data_tp, data_t1, m_t0, m_t1)
                     loss = lambda_ot * ot_loss + lambda_marginal * marginal_loss
+                    all_losses['ot_loss'].append(ot_loss.item())
+                    all_losses['marginal_loss'].append(marginal_loss.item())
                 elif growth_rate and not unbalanced:
                     loss = lambda_ot * criterion(data_tp, data_t1, m_tp, m1)
                     # loss = lambda_ot * criterion(data_tp, data_t1, m_tp)
@@ -317,18 +348,7 @@ def train(
                         density_loss = density_fn(data_tp, data_t1, top_k=top_k)
                     density_loss = density_loss.to(loss.device)
                     loss += lambda_density * density_loss
-
-                # if use_penalty:
-                #     if growth_rate:
-                #         NotImplemented
-                #     else:
-                #         dxdx = model.func(time, data_tp)
-                #     penalty = sum(model.norm)
-                #     loss += lambda_energy * penalty
-                
-                # if use_penalty_m:
-                #     penalty_m = sum(model.norm_m)
-                #     loss += lambda_energy_m * penalty_m
+                    all_losses['density_loss'].append(density_loss.item())
                 
                 if growth_rate and (lambda_energy > 0 or lambda_energy_m > 0):
                     eloss, emloss = energy_loss_growth_rate(model.func, data_tp, m_tp, time[-1])
@@ -337,9 +357,12 @@ def train(
                         print("Energy mass loss", emloss.item())
                     loss += lambda_energy * eloss
                     loss += lambda_energy_m * emloss
+                    all_losses['energy_loss'].append(eloss.item())
+                    all_losses['energy_mass_loss'].append(emloss.item())
                 elif lambda_energy > 0:
                     eloss = energy_loss(model.func, data_tp, time[-1])
                     loss += lambda_energy * eloss
+                    all_losses['energy_loss'].append(eloss.item())
                 # penalize diffusion term.
                 if isinstance(model, GrowthRateSDEModel) and (diffusion_lambda_energy > 0 or diffusion_lambda_energy_m > 0):
                     eloss, emloss = energy_loss_sde_growth_rate(model.gunc, data_tp, m_tp, time[-1])
@@ -348,6 +371,19 @@ def train(
                         print("Diffusion Energy mass loss", emloss.item())
                     loss += diffusion_lambda_energy * eloss
                     loss += diffusion_lambda_energy_m * emloss
+                    all_losses['diffusion_energy_loss'].append(eloss.item())
+                    all_losses['diffusion_energy_mass_loss'].append(emloss.item())
+
+                if growth_rate and lambda_unif_velo > 0:
+                    unif_velo_loss = unif_velo_loss_growth_rate(model.func, data_tp, m_tp, time[-1], torch.exp(model.func.mean_velo_logit))
+                    loss += lambda_unif_velo * unif_velo_loss
+                    all_losses['unif_velo_loss'].append(unif_velo_loss.item())
+                    if DEBUG:
+                        print("Unif velo loss", unif_velo_loss.item())
+                elif lambda_unif_velo > 0:
+                    unif_velo_loss = unif_velo_loss(model.func, data_tp, time[-1], torch.exp(model.func.mean_velo_logit))
+                    loss += lambda_unif_velo * unif_velo_loss
+                    all_losses['unif_velo_loss'].append(unif_velo_loss.item())
 
                 if growth_rate and lambda_m > 0:
                     # now taking the mean over all points, 
@@ -360,6 +396,7 @@ def train(
                     if DEBUG and m_tp.min() <= 0.:
                         print("Mass loss", m_loss.item())
                     loss += lambda_m * m_loss
+                    all_losses['mass_loss'].append(m_loss.item())
                 if growth_rate and lambda_m2 > 0:
                     if unbalanced:
                         m_loss = (torch.square(m_tp - group_sizes[t1])).mean()
@@ -368,6 +405,7 @@ def train(
                     if DEBUG and m_tp.min() <= 0.:
                         print("Mass loss 2", m_loss.item())
                     loss += lambda_m2 * m_loss
+                    all_losses['mass_loss2'].append(m_loss.item())
 
                 # apply local loss as we calculate it
                 if apply_losses_in_time and local_loss:
@@ -407,6 +445,7 @@ def train(
             ave_local_loss = torch.mean(batch_loss)
             sum_local_loss = torch.sum(batch_loss)            
             batch_losses.append(ave_local_loss.item())
+            all_losses['batch_loss'].append(ave_local_loss.item())
         
         # apply global loss
         elif global_loss and not local_loss:
@@ -477,6 +516,8 @@ def train(
                         ot_loss += ol
                         marginal_loss += ml
                 loss = lambda_ot * ot_loss + lambda_marginal * marginal_loss
+                all_losses['ot_loss'].append(ot_loss.item())
+                all_losses['marginal_loss'].append(marginal_loss.item())
             elif growth_rate and not unbalanced:
                 ot_loss = 0.
                 for i in range(1, len(groups)):
@@ -488,6 +529,7 @@ def train(
                             mi[i]
                         )
                 loss = lambda_ot * ot_loss
+                all_losses['ot_loss'].append(ot_loss.item())
             else:
                 loss = sum([
                     criterion(data_tp[i], data_ti[i]) 
@@ -495,6 +537,7 @@ def train(
                     if groups[i] != to_ignore
                 ])
                 loss = lambda_ot * loss
+                all_losses['ot_loss'].append(loss.item())
 
             if use_density_loss:                
                 if growth_rate:
@@ -506,19 +549,34 @@ def train(
                     density_loss = density_fn(data_tp, data_ti, groups, to_ignore, top_k)
                 density_loss = density_loss.to(loss.device)
                 loss += lambda_density * density_loss
+                all_losses['density_loss'].append(density_loss.item())
 
             if growth_rate and (lambda_energy > 0 or lambda_energy_m > 0):
                 eloss, emloss = energy_loss_growth_rate_seq(model.func, data_tp[non_ignore_idx,...], m_tp[non_ignore_idx,...], time[non_ignore_idx,...])
                 loss += lambda_energy * eloss
                 loss += lambda_energy_m * emloss
+                all_losses['energy_loss'].append(eloss.item())
+                all_losses['energy_mass_loss'].append(emloss.item())
             elif lambda_energy > 0:
                 eloss = energy_loss_seq(model.func, data_tp[non_ignore_idx,...], time[non_ignore_idx,...])
                 loss += lambda_energy * eloss
+                all_losses['energy_loss'].append(eloss.item())
             # penalize diffusion term.
             if isinstance(model, GrowthRateSDEModel) and (diffusion_lambda_energy > 0 or diffusion_lambda_energy_m > 0):
                 eloss, emloss = energy_loss_sde_growth_rate_seq(model.gunc, data_tp[non_ignore_idx,...], m_tp[non_ignore_idx,...], time[non_ignore_idx,...])
                 loss += diffusion_lambda_energy * eloss
                 loss += diffusion_lambda_energy_m * emloss
+                all_losses['diffusion_energy_loss'].append(eloss.item())
+                all_losses['diffusion_energy_mass_loss'].append(emloss.item())
+
+            if growth_rate and lambda_unif_velo > 0:
+                unif_velo_loss = unif_velo_loss_growth_rate_seq(model.func, data_tp[non_ignore_idx,...], m_tp[non_ignore_idx,...], time[non_ignore_idx,...], torch.exp(model.func.mean_velo_logit))
+                loss += lambda_unif_velo * unif_velo_loss
+                if DEBUG:   
+                    print("Unif velo loss", unif_velo_loss.item())
+            elif lambda_unif_velo > 0:
+                unif_velo_loss = unif_velo_loss_seq(model.func, data_tp[non_ignore_idx,...], time[non_ignore_idx,...], torch.exp(model.func.mean_velo_logit))
+                loss += lambda_unif_velo * unif_velo_loss
 
             # if use_penalty:
             #     penalty = sum([model.norm[-(i+1)] for i in range(1, len(groups))
@@ -574,7 +632,7 @@ def train(
         tqdm.write(f'Train loss: {np.round(np.mean(print_loss), 5)}')
     else:
         logger.info(f'Train loss: {np.round(np.mean(print_loss), 5)}')
-    return local_losses, batch_losses, globe_losses
+    return local_losses, batch_losses, globe_losses, all_losses
 
 # %% ../nbs/05_train.ipynb 4
 from .utils import generate_steps
@@ -734,7 +792,19 @@ def training_regimen(
     diffusion_energy_detach_m=False,
     use_kde=False,
     match_total_mass=True,
+
+    # additional train params for growth rate
+    lambda_unif_velo = 0.,
+    unif_velo_weighted = True,
+    unif_velo_detach_m = False,
+    unif_velo_square = False,
+    unif_velo_topk = None,
 ):
+    losses_dict = {
+        'pretraining': {},
+        'training': {},
+        'posttraining': {},
+    }
     recon = use_gae and not use_emb
     if steps is None:
         steps = generate_steps(groups)
@@ -764,7 +834,7 @@ def training_regimen(
     for epoch in tqdm(range(n_local_epochs), desc='Pretraining Epoch'):
         reverse = True if reverse_schema and epoch % reverse_n == 0 else False
 
-        l_loss, b_loss, g_loss = train(
+        l_loss, b_loss, g_loss, all_losses = train(
             model, df, groups, optimizer, n_batches, 
             criterion = criterion, use_cuda = use_cuda,
             local_loss=True, global_loss=False, apply_losses_in_time=True,
@@ -789,7 +859,16 @@ def training_regimen(
             diffusion_energy_detach_m=diffusion_energy_detach_m,
             use_kde=use_kde,
             match_total_mass=match_total_mass,
+            lambda_unif_velo=lambda_unif_velo,
+            unif_velo_weighted=unif_velo_weighted,
+            unif_velo_detach_m=unif_velo_detach_m,
+            unif_velo_square=unif_velo_square,
+            unif_velo_topk=unif_velo_topk,
         )
+        for key, value in all_losses.items():
+            if key not in losses_dict['pretraining']:
+                losses_dict['pretraining'][key] = []
+            losses_dict['pretraining'][key].extend(value)
         for k, v in l_loss.items():  
             local_losses[k].extend(v)
         batch_losses.extend(b_loss)
@@ -811,7 +890,7 @@ def training_regimen(
 
     for epoch in tqdm(range(n_epochs), desc='Epoch'):
         reverse = True if reverse_schema and epoch % reverse_n == 0 else False
-        l_loss, b_loss, g_loss = train(
+        l_loss, b_loss, g_loss, all_losses = train(
             model, df, groups, optimizer, n_batches, 
             criterion = criterion, use_cuda = use_cuda,
             local_loss=False, global_loss=True, apply_losses_in_time=True,
@@ -836,7 +915,16 @@ def training_regimen(
             diffusion_energy_detach_m=diffusion_energy_detach_m,
             use_kde=use_kde,
             match_total_mass=match_total_mass,
+            lambda_unif_velo=lambda_unif_velo,
+            unif_velo_weighted=unif_velo_weighted,
+            unif_velo_detach_m=unif_velo_detach_m,
+            unif_velo_square=unif_velo_square,
+            unif_velo_topk=unif_velo_topk,
         )
+        for key, value in all_losses.items():
+            if key not in losses_dict['training']:
+                losses_dict['training'][key] = []
+            losses_dict['training'][key].extend(value)
         for k, v in l_loss.items():  
             local_losses[k].extend(v)
         batch_losses.extend(b_loss)
@@ -859,7 +947,7 @@ def training_regimen(
     for epoch in tqdm(range(n_post_local_epochs), desc='Posttraining Epoch'):
         reverse = True if reverse_schema and epoch % reverse_n == 0 else False
 
-        l_loss, b_loss, g_loss = train(
+        l_loss, b_loss, g_loss, all_losses = train(
             model, df, groups, optimizer, n_batches, 
             criterion = criterion, use_cuda = use_cuda,
             local_loss=True, global_loss=False, apply_losses_in_time=True,
@@ -884,7 +972,16 @@ def training_regimen(
             diffusion_energy_detach_m=diffusion_energy_detach_m,
             use_kde=use_kde,
             match_total_mass=match_total_mass,
+            lambda_unif_velo=lambda_unif_velo,
+            unif_velo_weighted=unif_velo_weighted,
+            unif_velo_detach_m=unif_velo_detach_m,
+            unif_velo_square=unif_velo_square,
+            unif_velo_topk=unif_velo_topk,
         )
+        for key, value in all_losses.items():
+            if key not in losses_dict['posttraining']:
+                losses_dict['posttraining'][key] = []
+            losses_dict['posttraining'][key].extend(value)
         for k, v in l_loss.items():  
             local_losses[k].extend(v)
         batch_losses.extend(b_loss)
@@ -942,4 +1039,4 @@ def training_regimen(
             file=f'losses_l{n_local_epochs}_e{n_epochs}_ple{n_post_local_epochs}.png'
         )
 
-    return local_losses, batch_losses, globe_losses
+    return local_losses, batch_losses, globe_losses, losses_dict
