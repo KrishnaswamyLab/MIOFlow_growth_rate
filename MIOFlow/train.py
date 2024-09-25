@@ -86,7 +86,6 @@ def train(
     unif_velo_detach_m=False,
     unif_velo_square=False,
     unif_velo_topk=None,
-
 ):
 
     '''
@@ -258,6 +257,8 @@ def train(
         'mass_loss2': [],
     }
     
+    plans = {}
+
     for batch in tqdm(range(n_batches)):
         # print(f'Batch {batch+1}/{n_batches}')
         # apply local loss
@@ -324,6 +325,7 @@ def train(
                     loss = lambda_ot * ot_loss + lambda_marginal * marginal_loss
                     all_losses['ot_loss'].append(ot_loss.item())
                     all_losses['marginal_loss'].append(marginal_loss.item())
+                    plans[t1] = criterion.plan
                 elif growth_rate and not unbalanced:
                     loss = lambda_ot * criterion(data_tp, data_t1, m_tp, m1)
                     # loss = lambda_ot * criterion(data_tp, data_t1, m_tp)
@@ -375,13 +377,13 @@ def train(
                     all_losses['diffusion_energy_mass_loss'].append(emloss.item())
 
                 if growth_rate and lambda_unif_velo > 0:
-                    unif_velo_loss = unif_velo_loss_growth_rate(model.func, data_tp, m_tp, time[-1], torch.exp(model.func.mean_velo_logit))
+                    unif_velo_loss = unif_velo_loss_growth_rate(model.func, data_tp, m_tp, time[-1])
                     loss += lambda_unif_velo * unif_velo_loss
                     all_losses['unif_velo_loss'].append(unif_velo_loss.item())
                     if DEBUG:
                         print("Unif velo loss", unif_velo_loss.item())
                 elif lambda_unif_velo > 0:
-                    unif_velo_loss = unif_velo_loss(model.func, data_tp, time[-1], torch.exp(model.func.mean_velo_logit))
+                    unif_velo_loss = unif_velo_loss(model.func, data_tp, time[-1])
                     loss += lambda_unif_velo * unif_velo_loss
                     all_losses['unif_velo_loss'].append(unif_velo_loss.item())
 
@@ -515,6 +517,7 @@ def train(
                         ol, ml = criterion(data_tp[i], data_ti[i], m_tp[i], m_t1)
                         ot_loss += ol
                         marginal_loss += ml
+                        plans[groups[i]] = criterion.plan
                 loss = lambda_ot * ot_loss + lambda_marginal * marginal_loss
                 all_losses['ot_loss'].append(ot_loss.item())
                 all_losses['marginal_loss'].append(marginal_loss.item())
@@ -570,12 +573,12 @@ def train(
                 all_losses['diffusion_energy_mass_loss'].append(emloss.item())
 
             if growth_rate and lambda_unif_velo > 0:
-                unif_velo_loss = unif_velo_loss_growth_rate_seq(model.func, data_tp[non_ignore_idx,...], m_tp[non_ignore_idx,...], time[non_ignore_idx,...], torch.exp(model.func.mean_velo_logit))
+                unif_velo_loss = unif_velo_loss_growth_rate_seq(model.func, data_tp[non_ignore_idx,...], m_tp[non_ignore_idx,...], time[non_ignore_idx,...])
                 loss += lambda_unif_velo * unif_velo_loss
                 if DEBUG:   
                     print("Unif velo loss", unif_velo_loss.item())
             elif lambda_unif_velo > 0:
-                unif_velo_loss = unif_velo_loss_seq(model.func, data_tp[non_ignore_idx,...], time[non_ignore_idx,...], torch.exp(model.func.mean_velo_logit))
+                unif_velo_loss = unif_velo_loss_seq(model.func, data_tp[non_ignore_idx,...], time[non_ignore_idx,...])
                 loss += lambda_unif_velo * unif_velo_loss
 
             # if use_penalty:
@@ -632,7 +635,9 @@ def train(
         tqdm.write(f'Train loss: {np.round(np.mean(print_loss), 5)}')
     else:
         logger.info(f'Train loss: {np.round(np.mean(print_loss), 5)}')
-    return local_losses, batch_losses, globe_losses, all_losses
+
+    return local_losses, batch_losses, globe_losses, all_losses, plans
+
 
 # %% ../nbs/05_train.ipynb 4
 from .utils import generate_steps
@@ -799,6 +804,7 @@ def training_regimen(
     unif_velo_detach_m = False,
     unif_velo_square = False,
     unif_velo_topk = None,
+    return_plan=False,
 ):
     losses_dict = {
         'pretraining': {},
@@ -833,8 +839,7 @@ def training_regimen(
     reverse = False
     for epoch in tqdm(range(n_local_epochs), desc='Pretraining Epoch'):
         reverse = True if reverse_schema and epoch % reverse_n == 0 else False
-
-        l_loss, b_loss, g_loss, all_losses = train(
+        train_result = train(
             model, df, groups, optimizer, n_batches, 
             criterion = criterion, use_cuda = use_cuda,
             local_loss=True, global_loss=False, apply_losses_in_time=True,
@@ -865,6 +870,8 @@ def training_regimen(
             unif_velo_square=unif_velo_square,
             unif_velo_topk=unif_velo_topk,
         )
+        l_loss, b_loss, g_loss, all_losses, plans = train_result
+
         for key, value in all_losses.items():
             if key not in losses_dict['pretraining']:
                 losses_dict['pretraining'][key] = []
@@ -890,7 +897,7 @@ def training_regimen(
 
     for epoch in tqdm(range(n_epochs), desc='Epoch'):
         reverse = True if reverse_schema and epoch % reverse_n == 0 else False
-        l_loss, b_loss, g_loss, all_losses = train(
+        train_result = train(
             model, df, groups, optimizer, n_batches, 
             criterion = criterion, use_cuda = use_cuda,
             local_loss=False, global_loss=True, apply_losses_in_time=True,
@@ -921,6 +928,7 @@ def training_regimen(
             unif_velo_square=unif_velo_square,
             unif_velo_topk=unif_velo_topk,
         )
+        l_loss, b_loss, g_loss, all_losses, plans = train_result
         for key, value in all_losses.items():
             if key not in losses_dict['training']:
                 losses_dict['training'][key] = []
@@ -946,8 +954,7 @@ def training_regimen(
         
     for epoch in tqdm(range(n_post_local_epochs), desc='Posttraining Epoch'):
         reverse = True if reverse_schema and epoch % reverse_n == 0 else False
-
-        l_loss, b_loss, g_loss, all_losses = train(
+        train_result = train(
             model, df, groups, optimizer, n_batches, 
             criterion = criterion, use_cuda = use_cuda,
             local_loss=True, global_loss=False, apply_losses_in_time=True,
@@ -978,6 +985,7 @@ def training_regimen(
             unif_velo_square=unif_velo_square,
             unif_velo_topk=unif_velo_topk,
         )
+        l_loss, b_loss, g_loss, all_losses, plans = train_result
         for key, value in all_losses.items():
             if key not in losses_dict['posttraining']:
                 losses_dict['posttraining'][key] = []
@@ -1039,4 +1047,7 @@ def training_regimen(
             file=f'losses_l{n_local_epochs}_e{n_epochs}_ple{n_post_local_epochs}.png'
         )
 
-    return local_losses, batch_losses, globe_losses, losses_dict
+    if return_plan:
+        return local_losses, batch_losses, globe_losses, losses_dict, plans
+    else:
+        return local_losses, batch_losses, globe_losses, losses_dict

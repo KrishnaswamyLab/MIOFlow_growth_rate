@@ -91,7 +91,7 @@ import numpy as np
 class UOT_loss(nn.Module):
     _valid = 'mm_unbalanced'.split()
 
-    def __init__(self, which='mm_unbalanced', use_cuda=True, reg_m_l2=[5., 5.], detach_M=False, detach_m=False, use_uniform=False):
+    def __init__(self, which='mm_unbalanced', use_cuda=True, reg_m_l2=[5., 5.], detach_M=False, detach_m=False, use_uniform=False, marginal_match_dim=1):
         if which not in self._valid:
             raise ValueError(f'{which} not known ({self._valid})')
         elif which == 'mm_unbalanced':
@@ -101,6 +101,8 @@ class UOT_loss(nn.Module):
         self.detach_M = detach_M
         self.detach_m = detach_m
         self.use_uniform = use_uniform
+        assert marginal_match_dim in [0, 1]
+        self.marginal_match_dim = marginal_match_dim
 
     def __call__(self, source, target, source_density, target_density):
         assert source_density.shape[0] == source.shape[0] and target_density.shape[0] == target.shape[0]
@@ -121,8 +123,9 @@ class UOT_loss(nn.Module):
             mu1 = target_density # the target is uniform times n_samples, and we match that.
         plan = self.fn(mu1, nu1, M1)
         ot_loss = (plan * M).sum()
-        marginal_transported = plan.sum(dim=1)
+        marginal_transported = plan.sum(dim=self.marginal_match_dim)
         marginal_loss = nn.functional.mse_loss(marginal_transported, mu)
+        self.plan = plan
         return ot_loss, marginal_loss
 
 # %% ../nbs/01_losses.ipynb 6
@@ -384,8 +387,9 @@ class UnifVeloLossSeq(nn.Module):
         self.square = square
         self.topk = topk
 
-    def __call__(self, func, xtseq, t, mean_velo):
+    def __call__(self, func, xtseq, t):
         dxdt = torch.stack([func(t[i], xtseq[i]) for i in range(len(t))])
+        mean_velo = func.mean_velocity(t.unsqueeze(-1))
         norms = dxdt.norm(dim=-1)
         if self.square:
             res = torch.square(norms - mean_velo)
@@ -414,7 +418,7 @@ class UnifVeloLossGrowthRateSeq(nn.Module):
             self.softmax = normalize_by_sum
         self.square = square
         self.topk = topk
-    def __call__(self, func, xtseq, mtseq, t, mean_velo):
+    def __call__(self, func, xtseq, mtseq, t):
         """Returns the UnifVelo wrt the x and m curves separately.
 
         Args:
@@ -428,6 +432,7 @@ class UnifVeloLossGrowthRateSeq(nn.Module):
         """
         xmseq = torch.cat([xtseq, mtseq.unsqueeze(-1)], dim=-1)
         dxdt = torch.stack([func(t[i], xmseq[i]) for i in range(len(t))])
+        mean_velo = func.mean_velocity(t.unsqueeze(-1))
         if self.weighted:
             masses = self.softmax(mtseq) * mtseq.shape[-1]
             if self.detach_m:
@@ -450,8 +455,9 @@ class UnifVeloLoss(nn.Module):
         self.square = square
         self.topk = topk
 
-    def __call__(self, func, x, t, mean_velo): # should use the current t. i.e. t_seq[-1]
+    def __call__(self, func, x, t): # should use the current t. i.e. t_seq[-1]
         dxdt = func(t, x)
+        mean_velo = func.mean_velocity(torch.tensor([t], dtype=x.dtype, device=x.device))
         if self.square:
             res = torch.square(dxdt.norm(dim=-1) - mean_velo)
         else:
@@ -478,9 +484,10 @@ class UnifVeloLossGrowthRate(nn.Module):
         self.square = square
         self.topk = topk
 
-    def __call__(self, func, x, m, t, mean_velo):
+    def __call__(self, func, x, m, t):
         xm = torch.cat([x, m.unsqueeze(-1)], dim=-1)
         dxdt = func(t, xm)
+        mean_velo = func.mean_velocity(torch.tensor([t], dtype=x.dtype, device=x.device))
         if self.weighted:
             masses = self.softmax(m) * m.shape[-1]
             if self.detach_m:
