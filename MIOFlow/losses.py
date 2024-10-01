@@ -91,7 +91,7 @@ import numpy as np
 class UOT_loss(nn.Module):
     _valid = 'mm_unbalanced'.split()
 
-    def __init__(self, which='mm_unbalanced', use_cuda=True, reg_m_l2=[5., 5.], detach_M=False, detach_m=False, use_uniform=False, marginal_match_dim=1):
+    def __init__(self, which='mm_unbalanced', use_cuda=True, reg_m_l2=[5., 5.], detach_M=False, detach_m=False, detach_plan=True, use_uniform=False, marginal_match_dim=1):
         if which not in self._valid:
             raise ValueError(f'{which} not known ({self._valid})')
         elif which == 'mm_unbalanced':
@@ -100,6 +100,7 @@ class UOT_loss(nn.Module):
             pass
         self.detach_M = detach_M
         self.detach_m = detach_m
+        self.detach_plan = detach_plan
         self.use_uniform = use_uniform
         assert marginal_match_dim in [0, 1]
         self.marginal_match_dim = marginal_match_dim
@@ -122,6 +123,8 @@ class UOT_loss(nn.Module):
         if self.use_uniform:
             mu1 = target_density # the target is uniform times n_samples, and we match that.
         plan = self.fn(mu1, nu1, M1)
+        if self.detach_plan:
+            plan = plan.detach()
         ot_loss = (plan * M).sum()
         marginal_transported = plan.sum(dim=self.marginal_match_dim)
         marginal_loss = nn.functional.mse_loss(marginal_transported, mu)
