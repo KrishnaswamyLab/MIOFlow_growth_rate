@@ -15,10 +15,27 @@ import torch
 
 from .utils import sample, generate_steps
 from .losses import MMD_loss, OT_loss, Density_loss, Local_density_loss, density_specified_OT_loss, EnergyLoss, EnergyLossGrowthRate, EnergyLossSeq, EnergyLossGrowthRateSeq
-from .models import GrowthRateModel, GrowthRateSDEModel
+from .models import GrowthRateModel, GrowthRateSDEModel, ToyModelSepM
 from .utils import kde
 from .losses import UnifVeloLossSeq, UnifVeloLossGrowthRateSeq, UnifVeloLoss, UnifVeloLossGrowthRate
 DEBUG = False
+
+"""
+TODO
+do we want to match the growth rate with m or m derivative?
+because intially we want m to match the growth rate at the initial time point.
+think about how static ot growth rate is computed.
+it is the marginal of the OT plan.
+is it not the mass actually, instead of the derivative?
+
+Question2:
+when doing OT, do we want to set the target mass to be the growth rate or ones?
+
+Actually, we want the mass to match the growth rate at the previous time point.
+because the growth rate, although at the previous time point, is the mass that got transported to the current time point.
+especially, the growth rate at the first time point is the mass that got transported to the second time point.
+if it is 0, it gets killed at the second time point. it is still there at the first time point.
+"""
 
 def train(
     model, df, groups, optimizer, n_batches=20, 
@@ -56,6 +73,7 @@ def train(
 
     use_penalty=False,
     lambda_energy=1.0,
+    lambda_length=0.,
 
     reverse:bool = False,
     lambda_m = 0.,
@@ -86,6 +104,8 @@ def train(
     unif_velo_detach_m=False,
     unif_velo_square=False,
     unif_velo_topk=None,
+    growth_reg=False,
+    growth_reg_lambda=1.0,
 ):
 
     '''
@@ -199,7 +219,7 @@ def train(
     if use_cuda:
         model = model.cuda()
     
-    if isinstance(model, GrowthRateModel) or isinstance(model, GrowthRateSDEModel):
+    if isinstance(model, GrowthRateModel) or isinstance(model, GrowthRateSDEModel) or isinstance(model, ToyModelSepM):
         growth_rate = True
         assert isinstance(criterion, density_specified_OT_loss) or isinstance(criterion, UOT_loss), \
             'Criterion must be density_specified_OT_loss or UOT_loss when using growth_rate=True'
@@ -255,6 +275,7 @@ def train(
         'unif_velo_loss': [],
         'mass_loss': [],
         'mass_loss2': [],
+        'growth_loss': [],
     }
     
     plans = {}
@@ -277,6 +298,12 @@ def train(
                 # sample data
                 data_t0 = sample(df, t0, size=sample_size, replace=sample_with_replacement, to_torch=True, use_cuda=use_cuda)
                 data_t1 = sample(df, t1, size=sample_size, replace=sample_with_replacement, to_torch=True, use_cuda=use_cuda)
+                loss = 0.
+                if growth_reg:
+                    data_t0 = data_t0[:,:-1]
+                    growth_t0 = data_t0[:,-1]
+                    data_t1 = data_t1[:,:-1]
+                    growth_t1 = data_t1[:,-1]
                 time = torch.Tensor([t0, t1]).cuda() if use_cuda else torch.Tensor([t0, t1])
                 if add_noise:
                     data_t0 += noise(data_t0) * noise_scale
@@ -292,17 +319,26 @@ def train(
                     m0 = (logp0 - logp0.mean()) # normalize the logits to have mean 0, for numerical stability
                     logp1 = torch.log(density_t1).detach()
                     m1 = (logp1 - logp1.mean())
+                # elif growth_reg:
+                #     m0 = growth_t0 # initiallize with the growth rate at t0
+                #     m1 = None
                 else:
                     m0 = None
                     m1 = None
                 # prediction
                 if growth_rate:
+                    # print(data_t0.shape)
+                    # print(m0.shape)
+                    # print(time.shape)
+
                     data_tp0, m_tp0 = model(data_t0, time, m0=m0)
                     # if m_tp.min() <= 0.:
                     #     print('m:', m_tp.detach().cpu().numpy().tolist())
                     #     for name, param in model.named_parameters():
                     #         if param.requires_grad:
                     #             print(f"Gradient for {name}: {param.grad.max()}")
+
+
                     if detach_x:
                         data_tp = data_tp0.detach()
                     else:
@@ -311,6 +347,19 @@ def train(
                         m_tp = m_tp0.detach()
                     else:
                         m_tp = m_tp0
+                    if growth_reg:
+                        """so the growth rate is not the derivative but the mass."""
+                        # growth_tp = model.func(time[-1], data_tp)[:,-1] # the growth rate is the derivative at the end time point.
+                        growth_tp = m_tp0 # need to keep grad, so m_tp0, not m_tp.
+                        # no nan. the last time point is not matched to anything.
+                        # if growth_ti[i] contains nan, then skip the loss. (last time point does not have growth rate)
+                        # if torch.isnan(growth_t1).any():
+                        #     growth_loss = 0.
+                        # else:
+                        # growth_loss = torch.nn.functional.mse_loss(growth_tp, growth_t1) 
+                        growth_loss = torch.nn.functional.mse_loss(growth_tp, growth_t0) # match the growth rate of the previous time point
+                        loss += growth_reg_lambda * growth_loss
+                        all_losses['growth_loss'].append(growth_loss.item())
                 else:
                     data_tp = model(data_t0, time)
 
@@ -322,12 +371,12 @@ def train(
                     m_t1 = group_sizes[t1] * torch.ones(data_t1.size(0), dtype=data_t1.dtype, device=data_t1.device)
                     ot_loss, marginal_loss = criterion(data_tp, data_t1, m_tp, m_t1)
                     # ot_loss, marginal_loss = criterion(data_tp, data_t1, m_t0, m_t1)
-                    loss = lambda_ot * ot_loss + lambda_marginal * marginal_loss
+                    loss = loss + lambda_ot * ot_loss + lambda_marginal * marginal_loss
                     all_losses['ot_loss'].append(ot_loss.item())
                     all_losses['marginal_loss'].append(marginal_loss.item())
                     plans[t1] = criterion.plan
                 elif growth_rate and not unbalanced:
-                    loss = lambda_ot * criterion(data_tp, data_t1, m_tp, m1)
+                    loss = loss + lambda_ot * criterion(data_tp, data_t1, m_tp, m1)
                     # loss = lambda_ot * criterion(data_tp, data_t1, m_tp)
 
                     # if loss.isnan().any():
@@ -336,7 +385,7 @@ def train(
                     if DEBUG and m_tp.min() <= 0.:
                         print("OT loss", loss.item())
                 else:
-                    loss = lambda_ot * criterion(data_tp, data_t1)
+                    loss = loss + lambda_ot * criterion(data_tp, data_t1)
 
                 if use_density_loss: 
                     if growth_rate:
@@ -353,7 +402,11 @@ def train(
                     all_losses['density_loss'].append(density_loss.item())
                 
                 if growth_rate and (lambda_energy > 0 or lambda_energy_m > 0):
-                    eloss, emloss = energy_loss_growth_rate(model.func, data_tp, m_tp, time[-1])
+                    if isinstance(model, GrowthRateModel) or isinstance(model, GrowthRateSDEModel):
+                        eloss, emloss = energy_loss_growth_rate(model.func, data_tp, m_tp, time[-1])
+                    else:
+                        eloss = energy_loss(model.func, data_tp, time[-1])
+                        emloss = torch.tensor(0., device=eloss.device, dtype=eloss.dtype)
                     if DEBUG and m_tp.min() <= 0.:
                         print("Energy loss", eloss.item())
                         print("Energy mass loss", emloss.item())
@@ -376,16 +429,16 @@ def train(
                     all_losses['diffusion_energy_loss'].append(eloss.item())
                     all_losses['diffusion_energy_mass_loss'].append(emloss.item())
 
-                if growth_rate and lambda_unif_velo > 0:
-                    unif_velo_loss = unif_velo_loss_growth_rate(model.func, data_tp, m_tp, time[-1])
-                    loss += lambda_unif_velo * unif_velo_loss
-                    all_losses['unif_velo_loss'].append(unif_velo_loss.item())
+                if growth_rate and lambda_unif_velo and (isinstance(model, GrowthRateModel) or isinstance(model, GrowthRateSDEModel)):
+                    unif_velo_loss_val = unif_velo_loss_growth_rate(model.func, data_tp, m_tp, time[-1])
+                    loss += lambda_unif_velo * unif_velo_loss_val
+                    all_losses['unif_velo_loss'].append(unif_velo_loss_val.item())
                     if DEBUG:
                         print("Unif velo loss", unif_velo_loss.item())
                 elif lambda_unif_velo > 0:
-                    unif_velo_loss = unif_velo_loss(model.func, data_tp, time[-1])
-                    loss += lambda_unif_velo * unif_velo_loss
-                    all_losses['unif_velo_loss'].append(unif_velo_loss.item())
+                    unif_velo_loss_val = unif_velo_loss(model.func, data_tp, time[-1])
+                    loss += lambda_unif_velo * unif_velo_loss_val
+                    all_losses['unif_velo_loss'].append(unif_velo_loss_val.item())
 
                 if growth_rate and lambda_m > 0:
                     # now taking the mean over all points, 
@@ -454,13 +507,18 @@ def train(
             optimizer.zero_grad()
             #sampling, predicting, and evaluating the loss.
             # sample data
-            data_ti = [
-                sample(
-                    df, group, size=sample_size, replace=sample_with_replacement, 
+            data_ti = []
+            if growth_reg:
+                growth_ti = []
+            for group in groups:
+                sampled = sample(
+                    df, group, size=sample_size, replace=sample_with_replacement,
                     to_torch=True, use_cuda=use_cuda
                 )
-                for group in groups
-            ]
+                if growth_reg:
+                    growth_ti.append(sampled[:,-1])
+                    sampled = sampled[:,:-1]
+                data_ti.append(sampled)
             time = torch.Tensor(groups).cuda() if use_cuda else torch.Tensor(groups)
 
             if add_noise:
@@ -473,6 +531,8 @@ def train(
                 density_ti = [kde(data) for data in data_ti]
                 logpi = [torch.log(density).detach() for density in density_ti]
                 mi = [li - li.mean() for li in logpi]
+            # elif growth_reg:
+            #     mi = growth_ti + [None for data in data_ti[1:]]
             else:
                 mi = [None for data in data_ti]
             # prediction
@@ -486,6 +546,13 @@ def train(
                     m_tp = m_tp0.detach()
                 else:
                     m_tp = m_tp0
+                if growth_reg:
+                    """so the growth rate is not the derivative but the mass."""
+                    growth_tp = m_tp
+                    # growth_tp = []
+                    # for i in range(len(time)):
+                    #     growth_tp.append(model.func(time[i], data_tp[i])[:,-1])
+                    # growth_tp = torch.stack(growth_tp, dim=1)
             else:
                 data_tp = model(data_ti[0], time, return_whole_sequence=True)
             if autoencoder is not None and use_emb:        
@@ -506,6 +573,18 @@ def train(
             non_ignore_idx = [i for i in range(len(groups)) if groups[i] != to_ignore]
 
             # print("non_ignore_idx", non_ignore_idx)
+            loss = 0.
+            if growth_rate and growth_reg:
+                for i in range(1, len(groups)): # the first time point is not matched to anything.
+                    if groups[i] != to_ignore:
+                        # no nan. the last time point is not matched to anything.
+                        # if growth_ti[i] contains nan, then skip the loss. (last time point does not have growth rate)
+                        # if torch.isnan(growth_ti[i]).any():
+                        #     loss += 0.
+                        # else:
+                        # match predicted growth rate to the growth rate at the previous time point.
+                        loss += growth_reg_lambda * torch.nn.functional.mse_loss(growth_tp[i], growth_ti[i-1]) 
+                all_losses['growth_loss'].append(loss.item())
 
             if growth_rate and unbalanced:
                 ot_loss = 0.
@@ -518,7 +597,7 @@ def train(
                         ot_loss += ol
                         marginal_loss += ml
                         plans[groups[i]] = criterion.plan
-                loss = lambda_ot * ot_loss + lambda_marginal * marginal_loss
+                loss = loss + lambda_ot * ot_loss + lambda_marginal * marginal_loss
                 all_losses['ot_loss'].append(ot_loss.item())
                 all_losses['marginal_loss'].append(marginal_loss.item())
             elif growth_rate and not unbalanced:
@@ -531,7 +610,7 @@ def train(
                             m_tp[i],
                             mi[i]
                         )
-                loss = lambda_ot * ot_loss
+                loss = loss + lambda_ot * ot_loss
                 all_losses['ot_loss'].append(ot_loss.item())
             else:
                 loss = sum([
@@ -539,7 +618,7 @@ def train(
                     for i in range(1, len(groups))
                     if groups[i] != to_ignore
                 ])
-                loss = lambda_ot * loss
+                loss = loss + lambda_ot * loss
                 all_losses['ot_loss'].append(loss.item())
 
             if use_density_loss:                
@@ -555,7 +634,11 @@ def train(
                 all_losses['density_loss'].append(density_loss.item())
 
             if growth_rate and (lambda_energy > 0 or lambda_energy_m > 0):
-                eloss, emloss = energy_loss_growth_rate_seq(model.func, data_tp[non_ignore_idx,...], m_tp[non_ignore_idx,...], time[non_ignore_idx,...])
+                if isinstance(model, GrowthRateModel) or isinstance(model, GrowthRateSDEModel):
+                    eloss, emloss = energy_loss_growth_rate_seq(model.func, data_tp[non_ignore_idx,...], m_tp[non_ignore_idx,...], time[non_ignore_idx,...])
+                else:
+                    eloss = energy_loss_seq(model.func, data_tp[non_ignore_idx,...], time[non_ignore_idx,...])
+                    emloss = torch.tensor(0., device=eloss.device, dtype=eloss.dtype)
                 loss += lambda_energy * eloss
                 loss += lambda_energy_m * emloss
                 all_losses['energy_loss'].append(eloss.item())
@@ -572,14 +655,14 @@ def train(
                 all_losses['diffusion_energy_loss'].append(eloss.item())
                 all_losses['diffusion_energy_mass_loss'].append(emloss.item())
 
-            if growth_rate and lambda_unif_velo > 0:
-                unif_velo_loss = unif_velo_loss_growth_rate_seq(model.func, data_tp[non_ignore_idx,...], m_tp[non_ignore_idx,...], time[non_ignore_idx,...])
-                loss += lambda_unif_velo * unif_velo_loss
+            if growth_rate and lambda_unif_velo > 0 and (isinstance(model, GrowthRateModel) or isinstance(model, GrowthRateSDEModel)):
+                unif_velo_loss_val = unif_velo_loss_growth_rate_seq(model.func, data_tp[non_ignore_idx,...], m_tp[non_ignore_idx,...], time[non_ignore_idx,...])
+                loss += lambda_unif_velo * unif_velo_loss_val
                 if DEBUG:   
                     print("Unif velo loss", unif_velo_loss.item())
             elif lambda_unif_velo > 0:
-                unif_velo_loss = unif_velo_loss_seq(model.func, data_tp[non_ignore_idx,...], time[non_ignore_idx,...])
-                loss += lambda_unif_velo * unif_velo_loss
+                unif_velo_loss_val = unif_velo_loss_seq(model.func, data_tp[non_ignore_idx,...], time[non_ignore_idx,...])
+                loss += lambda_unif_velo * unif_velo_loss_val
 
             # if use_penalty:
             #     penalty = sum([model.norm[-(i+1)] for i in range(1, len(groups))
@@ -768,7 +851,7 @@ def training_regimen(
     sample_with_replacement=False, 
     logger=None, 
     add_noise=False, noise_scale=0.1, use_gaussian=True,  
-    use_penalty=False, lambda_energy=1.0,
+    use_penalty=False, lambda_energy=1.0, lambda_length=0.,
     # END: train params
 
 
@@ -805,6 +888,8 @@ def training_regimen(
     unif_velo_square = False,
     unif_velo_topk = None,
     return_plan=False,
+    growth_reg = False,
+    growth_reg_lambda = 1.0,
 ):
     losses_dict = {
         'pretraining': {},
@@ -850,7 +935,8 @@ def training_regimen(
             autoencoder = autoencoder, use_emb = use_emb, use_gae = use_gae, sample_size=sample_size, 
             sample_with_replacement=sample_with_replacement, logger=logger,
             add_noise=add_noise, noise_scale=noise_scale, use_gaussian=use_gaussian, 
-            use_penalty=use_penalty, lambda_energy=lambda_energy, reverse=reverse,
+            use_penalty=use_penalty, lambda_energy=lambda_energy, lambda_length=lambda_length,
+             reverse=reverse,
             lambda_m=lambda_m, lambda_m2=lambda_m2,
             use_penalty_m=use_penalty_m, lambda_energy_m=lambda_energy_m,
             lambda_ot=lambda_ot, lambda_marginal=lambda_marginal,
@@ -869,6 +955,8 @@ def training_regimen(
             unif_velo_detach_m=unif_velo_detach_m,
             unif_velo_square=unif_velo_square,
             unif_velo_topk=unif_velo_topk,
+            growth_reg=growth_reg,
+            growth_reg_lambda=growth_reg_lambda,
         )
         l_loss, b_loss, g_loss, all_losses, plans = train_result
 
@@ -908,7 +996,8 @@ def training_regimen(
             autoencoder = autoencoder, use_emb = use_emb, use_gae = use_gae, sample_size=sample_size, 
             sample_with_replacement=sample_with_replacement, logger=logger, 
             add_noise=add_noise, noise_scale=noise_scale, use_gaussian=use_gaussian,
-            use_penalty=use_penalty, lambda_energy=lambda_energy, reverse=reverse,
+            use_penalty=use_penalty, lambda_energy=lambda_energy, lambda_length=lambda_length,
+            reverse=reverse,
             lambda_m=lambda_m, lambda_m2=lambda_m2,
             use_penalty_m=use_penalty_m, lambda_energy_m=lambda_energy_m,
             lambda_ot=lambda_ot, lambda_marginal=lambda_marginal,
@@ -927,6 +1016,8 @@ def training_regimen(
             unif_velo_detach_m=unif_velo_detach_m,
             unif_velo_square=unif_velo_square,
             unif_velo_topk=unif_velo_topk,
+            growth_reg=growth_reg,
+            growth_reg_lambda=growth_reg_lambda,
         )
         l_loss, b_loss, g_loss, all_losses, plans = train_result
         for key, value in all_losses.items():
@@ -965,7 +1056,8 @@ def training_regimen(
             autoencoder = autoencoder, use_emb = use_emb, use_gae = use_gae, sample_size=sample_size, 
             sample_with_replacement=sample_with_replacement, logger=logger, 
             add_noise=add_noise, noise_scale=noise_scale, use_gaussian=use_gaussian,
-            use_penalty=use_penalty, lambda_energy=lambda_energy, reverse=reverse,
+            use_penalty=use_penalty, lambda_energy=lambda_energy, lambda_length=lambda_length,
+            reverse=reverse,
             lambda_m=lambda_m, lambda_m2=lambda_m2,
             use_penalty_m=use_penalty_m, lambda_energy_m=lambda_energy_m,
             lambda_ot=lambda_ot, lambda_marginal=lambda_marginal,
@@ -984,6 +1076,8 @@ def training_regimen(
             unif_velo_detach_m=unif_velo_detach_m,
             unif_velo_square=unif_velo_square,
             unif_velo_topk=unif_velo_topk,
+            growth_reg=growth_reg,
+            growth_reg_lambda=growth_reg_lambda,
         )
         l_loss, b_loss, g_loss, all_losses, plans = train_result
         for key, value in all_losses.items():

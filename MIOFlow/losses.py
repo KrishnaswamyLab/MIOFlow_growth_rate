@@ -309,12 +309,17 @@ class Local_density_loss(nn.Module):
 
 # %% ../nbs/01_losses.ipynb 11
 class EnergyLossSeq(nn.Module):
-    def __init__(self):
+    def __init__(self, length=False):
+        self.length = length
         pass
 
     def __call__(self, func, xtseq, t):
         dxdt = torch.stack([func(t[i], xtseq[i]) for i in range(len(t))])
-        return torch.square(dxdt).mean()
+        if self.length:
+            res = dxdt.norm(dim=-1).sum()
+        else:
+            res = torch.square(dxdt).mean()
+        return res
     
 class EnergyLossGrowthRateSeq(nn.Module):
     def __init__(self, weighted=True, detach_m=False, use_softmax=False, use_hard_softmax=False):
