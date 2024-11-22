@@ -56,6 +56,7 @@ def train(
 
     use_penalty=False,
     lambda_energy=1.0,
+    lambda_length=0.,
 
     reverse:bool = False,
     lambda_m = 0.,
@@ -768,7 +769,7 @@ def training_regimen(
     sample_with_replacement=False, 
     logger=None, 
     add_noise=False, noise_scale=0.1, use_gaussian=True,  
-    use_penalty=False, lambda_energy=1.0,
+    use_penalty=False, lambda_energy=1.0, lambda_length=0.,
     # END: train params
 
 
@@ -850,7 +851,8 @@ def training_regimen(
             autoencoder = autoencoder, use_emb = use_emb, use_gae = use_gae, sample_size=sample_size, 
             sample_with_replacement=sample_with_replacement, logger=logger,
             add_noise=add_noise, noise_scale=noise_scale, use_gaussian=use_gaussian, 
-            use_penalty=use_penalty, lambda_energy=lambda_energy, reverse=reverse,
+            use_penalty=use_penalty, lambda_energy=lambda_energy, lambda_length=lambda_length,
+             reverse=reverse,
             lambda_m=lambda_m, lambda_m2=lambda_m2,
             use_penalty_m=use_penalty_m, lambda_energy_m=lambda_energy_m,
             lambda_ot=lambda_ot, lambda_marginal=lambda_marginal,
@@ -908,7 +910,8 @@ def training_regimen(
             autoencoder = autoencoder, use_emb = use_emb, use_gae = use_gae, sample_size=sample_size, 
             sample_with_replacement=sample_with_replacement, logger=logger, 
             add_noise=add_noise, noise_scale=noise_scale, use_gaussian=use_gaussian,
-            use_penalty=use_penalty, lambda_energy=lambda_energy, reverse=reverse,
+            use_penalty=use_penalty, lambda_energy=lambda_energy, lambda_length=lambda_length,
+            reverse=reverse,
             lambda_m=lambda_m, lambda_m2=lambda_m2,
             use_penalty_m=use_penalty_m, lambda_energy_m=lambda_energy_m,
             lambda_ot=lambda_ot, lambda_marginal=lambda_marginal,
@@ -965,7 +968,8 @@ def training_regimen(
             autoencoder = autoencoder, use_emb = use_emb, use_gae = use_gae, sample_size=sample_size, 
             sample_with_replacement=sample_with_replacement, logger=logger, 
             add_noise=add_noise, noise_scale=noise_scale, use_gaussian=use_gaussian,
-            use_penalty=use_penalty, lambda_energy=lambda_energy, reverse=reverse,
+            use_penalty=use_penalty, lambda_energy=lambda_energy, lambda_length=lambda_length,
+            reverse=reverse,
             lambda_m=lambda_m, lambda_m2=lambda_m2,
             use_penalty_m=use_penalty_m, lambda_energy_m=lambda_energy_m,
             lambda_ot=lambda_ot, lambda_marginal=lambda_marginal,

@@ -91,13 +91,16 @@ import numpy as np
 class UOT_loss(nn.Module):
     _valid = 'mm_unbalanced'.split()
 
-    def __init__(self, which='mm_unbalanced', use_cuda=True, reg_m_l2=[5., 5.], detach_M=False, detach_m=False, detach_plan=True, use_uniform=False, marginal_match_dim=1):
+    def __init__(self, which='mm_unbalanced', use_cuda=True, reg_m_l2=[5., 5.], detach_M=False, detach_m=False, detach_plan=True, use_uniform=False, marginal_match_dim=1, balanced=False):
         if which not in self._valid:
             raise ValueError(f'{which} not known ({self._valid})')
         elif which == 'mm_unbalanced':
             self.fn = lambda m, n, M: ot.unbalanced.mm_unbalanced(m, n, M, reg_m_l2, div='l2')
         else:
             pass
+        self.balanced = balanced
+        if balanced:
+            self.fn = lambda m, n, M: ot.emd(m, n, M)
         self.detach_M = detach_M
         self.detach_m = detach_m
         self.detach_plan = detach_plan
@@ -122,6 +125,9 @@ class UOT_loss(nn.Module):
             nu1 = nu
         if self.use_uniform:
             mu1 = target_density # the target is uniform times n_samples, and we match that.
+        if self.balanced:
+            mu1 = mu1 / mu1.sum()
+            nu1 = nu1 / nu1.sum()
         plan = self.fn(mu1, nu1, M1)
         if self.detach_plan:
             plan = plan.detach()
@@ -309,12 +315,17 @@ class Local_density_loss(nn.Module):
 
 # %% ../nbs/01_losses.ipynb 11
 class EnergyLossSeq(nn.Module):
-    def __init__(self):
+    def __init__(self, length=False):
+        self.length = length
         pass
 
     def __call__(self, func, xtseq, t):
         dxdt = torch.stack([func(t[i], xtseq[i]) for i in range(len(t))])
-        return torch.square(dxdt).mean()
+        if self.length:
+            res = dxdt.norm(dim=-1).sum()
+        else:
+            res = torch.square(dxdt).mean()
+        return res
     
 class EnergyLossGrowthRateSeq(nn.Module):
     def __init__(self, weighted=True, detach_m=False, use_softmax=False, use_hard_softmax=False):
